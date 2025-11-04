@@ -9,15 +9,29 @@ from datetime import datetime, timezone
 SEEN_ACCOUNTS_FILE = "seen_accounts.txt"
 
 def load_seen_accounts():
+    logging.info(f"Loading seen accounts from file: {SEEN_ACCOUNTS_FILE}")
     if not os.path.exists(SEEN_ACCOUNTS_FILE):
+        logging.info(f"Seen accounts file does not exist. Creating empty set.")
         return set()
-    with open(SEEN_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f if line.strip())
+    
+    try:
+        with open(SEEN_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+            accounts = set(line.strip() for line in f if line.strip())
+        logging.info(f"Successfully loaded {len(accounts)} seen accounts: {sorted(accounts)}")
+        return accounts
+    except Exception as e:
+        logging.error(f"Error loading seen accounts file: {e}")
+        return set()
 
 def save_seen_accounts(accounts):
-    with open(SEEN_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-        for acc in sorted(accounts):
-            f.write(acc + "\n")
+    logging.info(f"Saving {len(accounts)} seen accounts to file: {SEEN_ACCOUNTS_FILE}")
+    try:
+        with open(SEEN_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            for acc in sorted(accounts):
+                f.write(acc + "\n")
+        logging.info(f"Successfully saved seen accounts: {sorted(accounts)}")
+    except Exception as e:
+        logging.error(f"Error saving seen accounts file: {e}")
 
 
 # === CONFIG ===
@@ -104,10 +118,12 @@ def extract_feed_link_from_html(html):
     return None
 
 def process_mailbox():
-
+    logging.info("=" * 60)
+    logging.info("Starting mailbox processing...")
     logging.info("Connecting to IMAP server.")
     M = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
     seen_accounts = load_seen_accounts()
+    logging.info(f"Initial seen accounts count: {len(seen_accounts)}")
     new_accounts_found = False
     try:
         M.login(IMAP_USER, IMAP_PASS)
@@ -159,19 +175,28 @@ def process_mailbox():
             # link format: https://x.com/{username}/status/{tweet_id}
             try:
                 username = link.split("/")[3]
-            except Exception:
+                logging.info(f"Extracted username from link: '{username}'")
+            except Exception as e:
+                logging.warning(f"Failed to extract username from link '{link}': {e}")
                 username = None
 
             # === NEW: Place followers order if new account ===
             if username and username not in seen_accounts:
-                logging.info(f"New account detected: {username}. Placing followers order.")
+                logging.info(f"🆕 NEW ACCOUNT DETECTED: '{username}' - Not in seen accounts!")
+                logging.info(f"Current seen accounts before adding: {sorted(seen_accounts)}")
+                logging.info(f"Placing followers order for new account '{username}' with {FOLLOWERS_QUANTITY} followers")
                 res = create_jap_order(FOLLOWERS_SERVICE_ID, link, FOLLOWERS_QUANTITY)
-                logging.info(f"Followers order result: {res}")
+                logging.info(f"Followers order result for '{username}': {res}")
                 seen_accounts.add(username)
+                logging.info(f"✅ Added '{username}' to seen accounts. New count: {len(seen_accounts)}")
+                logging.info(f"Updated seen accounts: {sorted(seen_accounts)}")
                 new_accounts_found = True
                 time.sleep(1.2)
+            elif username:
+                logging.info(f"⏭️  Account '{username}' already seen. Current seen accounts: {sorted(seen_accounts)}")
+                logging.info(f"No followers order placed for existing account '{username}'")
             else:
-                logging.info(f"Account {username} already seen. No followers order placed.")
+                logging.warning("⚠️  No username extracted, cannot check seen accounts")
 
             # create JAP orders for this link (existing logic)
             for metric, sid in SERVICES.items():
@@ -188,23 +213,53 @@ def process_mailbox():
 
         # Save updated seen accounts if any new were found
         if new_accounts_found:
+            logging.info(f"💾 New accounts were found in this session. Saving updated seen accounts...")
             save_seen_accounts(seen_accounts)
+            logging.info(f"✅ Seen accounts file updated successfully")
+        else:
+            logging.info(f"ℹ️  No new accounts found in this session. Seen accounts unchanged: {len(seen_accounts)} accounts")
 
     except Exception as e:
         logging.error(f"Exception in process_mailbox: {e}")
     finally:
-        M.logout()
-        logging.info("Logged out from IMAP server.")
+        try:
+            M.logout()
+            logging.info("Logged out from IMAP server.")
+        except Exception as e:
+            logging.warning(f"Error during IMAP logout: {e}")
+        
+        # Final summary of seen accounts
+        logging.info(f"📊 MAILBOX PROCESSING SUMMARY:")
+        logging.info(f"   - Total seen accounts: {len(seen_accounts)}")
+        logging.info(f"   - New accounts found: {'Yes' if new_accounts_found else 'No'}")
+        logging.info(f"   - Current seen accounts: {sorted(seen_accounts)}")
+        logging.info("=" * 60)
 
 if __name__ == "__main__":
     if not all([IMAP_USER, IMAP_PASS, JAP_API_KEY]):
         logging.critical("Configure IMAP_USER / IMAP_PASS / JAP_API_KEY in .env")
         raise SystemExit(1)
-    logging.info(f"Starting IMAP monitor, polling every {POLL_INTERVAL} seconds.")
+    
+    # Log startup information
+    logging.info("🚀 STARTING X AUTO BOOST MONITOR")
+    logging.info(f"📧 IMAP Host: {IMAP_HOST}:{IMAP_PORT}")
+    logging.info(f"👤 IMAP User: {IMAP_USER}")
+    logging.info(f"🔄 Poll Interval: {POLL_INTERVAL} seconds ({POLL_INTERVAL/3600:.1f} hours)")
+    logging.info(f"📁 Seen accounts file: {SEEN_ACCOUNTS_FILE}")
+    
+    # Load and log initial seen accounts
+    initial_seen = load_seen_accounts()
+    logging.info(f"🎯 Initial setup complete. Starting monitoring loop...")
+    
+    cycle_count = 0
     while True:
+        cycle_count += 1
         try:
+            logging.info(f"🔄 CYCLE #{cycle_count} - Starting mailbox check...")
             process_mailbox()
+            logging.info(f"✅ CYCLE #{cycle_count} - Completed successfully")
         except Exception as e:
-            logging.error(f"Error in mailbox processing: {e}")
-        logging.info(f"Sleeping for {POLL_INTERVAL} seconds before next poll.")
+            logging.error(f"❌ CYCLE #{cycle_count} - Error in mailbox processing: {e}")
+        
+        logging.info(f"😴 Sleeping for {POLL_INTERVAL} seconds before next poll (cycle #{cycle_count + 1})...")
         time.sleep(POLL_INTERVAL)
