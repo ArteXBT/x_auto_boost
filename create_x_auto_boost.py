@@ -5,33 +5,16 @@ import requests
 from dotenv import load_dotenv
 from datetime import datetime, timezone
 
-# === NEW: Persistent seen accounts storage ===
-SEEN_ACCOUNTS_FILE = "seen_accounts.txt"
+# === In-memory seen accounts storage (no persistence) ===
+# This will reset each time the script is restarted
+seen_accounts_memory = set()
 
-def load_seen_accounts():
-    logging.info(f"Loading seen accounts from file: {SEEN_ACCOUNTS_FILE}")
-    if not os.path.exists(SEEN_ACCOUNTS_FILE):
-        logging.info(f"Seen accounts file does not exist. Creating empty set.")
-        return set()
-    
-    try:
-        with open(SEEN_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-            accounts = set(line.strip() for line in f if line.strip())
-        logging.info(f"Successfully loaded {len(accounts)} seen accounts: {sorted(accounts)}")
-        return accounts
-    except Exception as e:
-        logging.error(f"Error loading seen accounts file: {e}")
-        return set()
-
-def save_seen_accounts(accounts):
-    logging.info(f"Saving {len(accounts)} seen accounts to file: {SEEN_ACCOUNTS_FILE}")
-    try:
-        with open(SEEN_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-            for acc in sorted(accounts):
-                f.write(acc + "\n")
-        logging.info(f"Successfully saved seen accounts: {sorted(accounts)}")
-    except Exception as e:
-        logging.error(f"Error saving seen accounts file: {e}")
+def get_seen_accounts():
+    """Get the current seen accounts from memory"""
+    logging.info(f"Current seen accounts in memory: {len(seen_accounts_memory)} accounts")
+    if seen_accounts_memory:
+        logging.info(f"Seen accounts: {sorted(seen_accounts_memory)}")
+    return seen_accounts_memory
 
 
 # === CONFIG ===
@@ -104,16 +87,51 @@ def create_jap_order(service_id, link, quantity):
 
 def extract_feed_link_from_html(html):
     logging.info("Extracting feed link from HTML content.")
+    logging.info(f"HTML content to parse (first 500 chars): {html[:500]}...")  # Log first 500 chars
+    
     soup = BeautifulSoup(html, "html.parser")
+    all_links = []
+    
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        m = FEED_LINK_RE.search(href)
-        if m:
-            username = m.group(1)
-            tweet_id = m.group(2)
-            link = f"https://x.com/{username}/status/{tweet_id}"
-            logging.info(f"Found tweet link in HTML: {link}")
-            return link
+        all_links.append(href)
+        
+        # Check if the link contains 'status' (more flexible detection)
+        if 'status' in href:
+            logging.info(f"Found link containing 'status': {href}")
+            
+            # Try to extract from various formats
+            # Format 1: Original rss.xcancel.com format
+            m = FEED_LINK_RE.search(href)
+            if m:
+                username = m.group(1)
+                tweet_id = m.group(2)
+                link = f"https://x.com/{username}/status/{tweet_id}"
+                logging.info(f"Found tweet link from rss.xcancel.com: {link}")
+                return link
+            
+            # Format 2: xcancel.com format (without rss. prefix)
+            xcancel_match = re.search(r'https?://xcancel\.com/([A-Za-z0-9_]+)/status/(\d+)', href)
+            if xcancel_match:
+                username = xcancel_match.group(1)
+                tweet_id = xcancel_match.group(2)
+                link = f"https://x.com/{username}/status/{tweet_id}"
+                logging.info(f"Found tweet link from xcancel.com: {link}")
+                return link
+            
+            # Format 3: Direct x.com/twitter.com status links
+            status_match = re.search(r'(?:twitter\.com|x\.com)/([A-Za-z0-9_]+)/status/(\d+)', href)
+            if status_match:
+                username = status_match.group(1)
+                tweet_id = status_match.group(2)
+                link = f"https://x.com/{username}/status/{tweet_id}"
+                logging.info(f"Found direct status link: {link}")
+                return link
+            
+            # Format 4: Any other format containing status - try to extract what we can
+            logging.info(f"Found 'status' link but couldn't parse: {href}")
+    
+    logging.info(f"All links found in HTML: {all_links}")
     logging.warning("No matching feed link found in HTML.")
     return None
 
@@ -122,8 +140,8 @@ def process_mailbox():
     logging.info("Starting mailbox processing...")
     logging.info("Connecting to IMAP server.")
     M = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-    seen_accounts = load_seen_accounts()
-    logging.info(f"Initial seen accounts count: {len(seen_accounts)}")
+    get_seen_accounts()  # Just to log the current state
+    logging.info(f"Initial seen accounts count: {len(seen_accounts_memory)}")
     new_accounts_found = False
     try:
         M.login(IMAP_USER, IMAP_PASS)
@@ -181,19 +199,19 @@ def process_mailbox():
                 username = None
 
             # === NEW: Place followers order if new account ===
-            if username and username not in seen_accounts:
+            if username and username not in seen_accounts_memory:
                 logging.info(f"🆕 NEW ACCOUNT DETECTED: '{username}' - Not in seen accounts!")
-                logging.info(f"Current seen accounts before adding: {sorted(seen_accounts)}")
+                logging.info(f"Current seen accounts before adding: {sorted(seen_accounts_memory)}")
                 logging.info(f"Placing followers order for new account '{username}' with {FOLLOWERS_QUANTITY} followers")
                 res = create_jap_order(FOLLOWERS_SERVICE_ID, link, FOLLOWERS_QUANTITY)
                 logging.info(f"Followers order result for '{username}': {res}")
-                seen_accounts.add(username)
-                logging.info(f"✅ Added '{username}' to seen accounts. New count: {len(seen_accounts)}")
-                logging.info(f"Updated seen accounts: {sorted(seen_accounts)}")
+                seen_accounts_memory.add(username)
+                logging.info(f"✅ Added '{username}' to seen accounts. New count: {len(seen_accounts_memory)}")
+                logging.info(f"Updated seen accounts: {sorted(seen_accounts_memory)}")
                 new_accounts_found = True
                 time.sleep(1.2)
             elif username:
-                logging.info(f"⏭️  Account '{username}' already seen. Current seen accounts: {sorted(seen_accounts)}")
+                logging.info(f"⏭️  Account '{username}' already seen. Current seen accounts: {sorted(seen_accounts_memory)}")
                 logging.info(f"No followers order placed for existing account '{username}'")
             else:
                 logging.warning("⚠️  No username extracted, cannot check seen accounts")
@@ -211,13 +229,12 @@ def process_mailbox():
             # mark the email as seen (processed)
             M.store(msgid, "+FLAGS", "\\Seen")
 
-        # Save updated seen accounts if any new were found
+        # Log session summary
         if new_accounts_found:
-            logging.info(f"💾 New accounts were found in this session. Saving updated seen accounts...")
-            save_seen_accounts(seen_accounts)
-            logging.info(f"✅ Seen accounts file updated successfully")
+            logging.info(f"💾 New accounts were found in this session: {sorted(seen_accounts_memory)}")
+            logging.info(f"✅ Session completed with {len(seen_accounts_memory)} accounts in memory")
         else:
-            logging.info(f"ℹ️  No new accounts found in this session. Seen accounts unchanged: {len(seen_accounts)} accounts")
+            logging.info(f"ℹ️  No new accounts found in this session. Seen accounts unchanged: {len(seen_accounts_memory)} accounts")
 
     except Exception as e:
         logging.error(f"Exception in process_mailbox: {e}")
@@ -230,9 +247,9 @@ def process_mailbox():
         
         # Final summary of seen accounts
         logging.info(f"📊 MAILBOX PROCESSING SUMMARY:")
-        logging.info(f"   - Total seen accounts: {len(seen_accounts)}")
+        logging.info(f"   - Total seen accounts: {len(seen_accounts_memory)}")
         logging.info(f"   - New accounts found: {'Yes' if new_accounts_found else 'No'}")
-        logging.info(f"   - Current seen accounts: {sorted(seen_accounts)}")
+        logging.info(f"   - Current seen accounts: {sorted(seen_accounts_memory)}")
         logging.info("=" * 60)
 
 if __name__ == "__main__":
@@ -245,10 +262,10 @@ if __name__ == "__main__":
     logging.info(f"📧 IMAP Host: {IMAP_HOST}:{IMAP_PORT}")
     logging.info(f"👤 IMAP User: {IMAP_USER}")
     logging.info(f"🔄 Poll Interval: {POLL_INTERVAL} seconds ({POLL_INTERVAL/3600:.1f} hours)")
-    logging.info(f"📁 Seen accounts file: {SEEN_ACCOUNTS_FILE}")
+    logging.info("� Storage: In-memory only (resets on restart)")
     
-    # Load and log initial seen accounts
-    initial_seen = load_seen_accounts()
+    # Initialize and log initial seen accounts
+    initial_seen = get_seen_accounts()
     logging.info(f"🎯 Initial setup complete. Starting monitoring loop...")
     
     cycle_count = 0
